@@ -1,7 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Mutation, Row, Vault } from "./types";
-const url = import.meta.env.VITE_SUPABASE_URL,
-  token = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const url = String(import.meta.env.VITE_SUPABASE_URL || "")
+  .trim()
+  .replace(/\/(?:rest\/v1|auth\/v1|graphql\/v1)\/?$/, "")
+  .replace(/\/+$/, "");
+
+const token = import.meta.env.VITE_SUPABASE_ANON_KEY;
 function publicKey(value: string) {
   if (value.startsWith("sb_publishable_")) return true;
   try {
