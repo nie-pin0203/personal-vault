@@ -179,12 +179,11 @@ export function App() {
                 redirectTo: redirectTo(),
               })
             : await client.auth.signInWithPassword({ email, password });
-      if (result.error)
-        throw new Error(
-          authMode === "登录"
-            ? "登录失败，请检查邮箱、密码和邮箱验证状态"
-            : "请求失败，请检查邮箱格式、密码要求和发送频率",
-        );
+     if (result.error) {
+  throw new Error(
+    `请求失败（${result.error.status ?? "未知状态码"}）：${result.error.message}`
+  );
+}
       if (authMode !== "登录") setNotice("请查收邮箱中的验证或重置链接");
     });
   }
