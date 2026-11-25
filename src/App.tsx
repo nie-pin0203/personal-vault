@@ -77,20 +77,6 @@ export function App() {
     if (!client) return;
     const { data } = client.auth.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") setReset(true);
-      if (session) {
-        const storageKey = "miyu-session-active-" + session.user.id;
-        const stored = localStorage.getItem(storageKey);
-        if (
-          event === "INITIAL_SESSION" &&
-          stored &&
-          Date.now() - Number(stored) > 15 * 60 * 1000
-        ) {
-          void client!.auth.signOut({ scope: "local" });
-          return;
-        }
-        if (event === "SIGNED_IN" || !stored)
-          localStorage.setItem(storageKey, String(Date.now()));
-      }
       setUser((previous) => {
         const next = session?.user.id ?? null;
         if (previous !== next) {
@@ -116,35 +102,6 @@ export function App() {
       );
     return () => {
       alive = false;
-    };
-  }, [user]);
-  useEffect(() => {
-    if (!user) return;
-    let last = Date.now();
-    const touch = () => {
-      last = Date.now();
-      localStorage.setItem("miyu-session-active-" + user, String(last));
-    };
-    const tick = setInterval(() => {
-      if (Date.now() - last > 15 * 60 * 1000) {
-        lock();
-        setUser(null);
-        void client?.auth.signOut({ scope: "local" });
-      }
-    }, 10000);
-    const hide = () => {
-      if (document.hidden) lock();
-    };
-    window.addEventListener("pointerdown", touch);
-    window.addEventListener("keydown", touch);
-    document.addEventListener("visibilitychange", hide);
-    window.addEventListener("pagehide", lock);
-    return () => {
-      clearInterval(tick);
-      window.removeEventListener("pointerdown", touch);
-      window.removeEventListener("keydown", touch);
-      document.removeEventListener("visibilitychange", hide);
-      window.removeEventListener("pagehide", lock);
     };
   }, [user]);
   async function action(fn: () => Promise<void>) {
@@ -476,7 +433,7 @@ export function App() {
               {notice}
             </p>
           )}
-          <small>15 分钟无操作自动退出，切换到后台自动锁定。</small>
+          <small>此设备会保持登录。刷新或关闭页面后需重新解锁密码库。</small>
         </div>
       </section>
     </main>
@@ -932,7 +889,7 @@ export function Workspace({
                 复制 30 秒后提醒清理
               </label>
               <p>
-                浏览器无法保证自动清除所有系统剪贴板内容。切换应用后密码库自动锁定，提醒可能停止。
+                浏览器无法保证自动清除所有系统剪贴板内容。切换应用后提醒可能停止，请在不使用时手动锁定密码库。
               </p>
               <h3>安装到桌面</h3>
               <p>
