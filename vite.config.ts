@@ -44,6 +44,7 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
+          cacheId: "miyu-session-v2",
           globPatterns: ["**/*.{js,css,html,png,woff2}"],
           navigateFallback: "index.html",
           navigateFallbackDenylist: [/\/auth\//],

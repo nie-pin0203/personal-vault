@@ -91,7 +91,11 @@ export async function initialize(user_id: string, password: string) {
   recoveryRaw.fill(0);
   return { key, vault, recoveryKey };
 }
-export async function unlock(vault: Vault, password: string) {
+export async function unlock(
+  vault: Vault,
+  password: string,
+  remember?: (raw: Uint8Array) => Promise<void>,
+) {
   const raw = unb64(
     await open<string>(
       await derive(password, vault.salt, vault.iterations),
@@ -100,6 +104,7 @@ export async function unlock(vault: Vault, password: string) {
     ),
   );
   try {
+    if (remember) await remember(raw);
     return await importKey(raw);
   } finally {
     raw.fill(0);

@@ -25,6 +25,12 @@ import {
 } from "lucide-react";
 import { client, getVault, redirectTo, saveVault } from "./backend";
 import { generatePassword, initialize, rewrap, unlock } from "./crypto";
+import {
+  forgetDevice,
+  rememberDevice,
+  restoreDevice,
+  trustRevision,
+} from "./deviceTrust";
 import { exportBackup, importBackup } from "./backup";
 import { useVault } from "./useVault";
 import { writeClipboard } from "./clipboard";
@@ -49,6 +55,44 @@ function errorText(error: unknown) {
     ? error.message
     : "操作失败，请检查输入后重试";
 }
+export function authErrorText(error: {
+  code?: string;
+  status?: number;
+  name?: string;
+}) {
+  const messages: Record<string, string> = {
+    email_address_not_authorized:
+      "此邮箱尚未获准接收验证邮件。请在 Supabase 配置自定义 SMTP，或使用项目组织成员的邮箱测试。",
+    over_email_send_rate_limit:
+      "验证邮件发送已达到限额，请稍后重试，或检查 Supabase 邮件服务与发送限额。",
+    over_request_rate_limit: "请求过于频繁，请稍后重试。",
+    weak_password:
+      "密码不符合服务器要求。请使用至少 12 个字符，并检查 Supabase 的密码强度设置。",
+    signup_disabled: "Supabase 已关闭新用户注册，请在认证设置中开启。",
+    email_provider_disabled: "Supabase 邮箱登录方式尚未开启。",
+    email_address_invalid: "邮箱地址格式无效，请检查拼写。",
+    validation_failed: "注册信息校验失败，请检查邮箱格式及服务器的密码要求。",
+    captcha_failed:
+      "项目要求验证码，但当前页面未集成验证码，需要完成验证码接入。",
+    email_not_confirmed: "邮箱尚未验证，请先点击验证邮件中的链接。",
+    invalid_credentials: "登录失败，请检查邮箱和登录密码。",
+    user_already_exists: "此账号已存在，请尝试登录或重置登录密码。",
+    unexpected_failure:
+      "认证服务处理失败，请检查 Supabase Auth 日志及 SMTP 配置。",
+  };
+  const code = /^[a-z0-9_]{1,80}$/.test(error.code ?? "")
+    ? error.code!
+    : "unknown";
+  const status = Number.isInteger(error.status)
+    ? String(error.status)
+    : "unknown";
+  const message =
+    messages[code] ??
+    (error.name === "AuthRetryableFetchError" || error.status === 0
+      ? "无法完成认证请求，请检查网络、浏览器拦截及 Supabase 服务连接。"
+      : "认证请求失败，请提供下方错误代码以继续排查。");
+  return `${message}（错误代码 ${code}，HTTP ${status}）`;
+}
 export function App() {
   const [user, setUser] = useState<string | null>(null),
     [vault, setVault] = useState<Vault | null | undefined>(undefined),
@@ -63,11 +107,18 @@ export function App() {
     localStorage.getItem("miyu-theme") === "dark",
   );
   const generation = useRef(0);
+  const userRef = useRef<string | null>(null);
+  const [trust, setTrust] = useState(false);
   const lock = () => {
     generation.current++;
     setKey(null);
     setRecovery("");
-    setNotice("密码库已锁定");
+    setTrust(false);
+    if (userRef.current)
+      void forgetDevice(userRef.current).catch(() =>
+        setNotice("设备凭据清理失败，请清除本站点数据后重试"),
+      );
+    setNotice("密码库已锁定，已取消此设备信任");
   };
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -77,16 +128,21 @@ export function App() {
     if (!client) return;
     const { data } = client.auth.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") setReset(true);
-      setUser((previous) => {
-        const next = session?.user.id ?? null;
-        if (previous !== next) {
-          generation.current++;
-          setKey(null);
-          setVault(undefined);
-          setRecovery("");
-        }
-        return next;
-      });
+      const next = session?.user.id ?? null;
+      const previous = userRef.current;
+      if (previous !== next) {
+        generation.current++;
+        setKey(null);
+        setVault(undefined);
+        setRecovery("");
+        setTrust(false);
+        if (previous)
+          void forgetDevice(previous).catch(() =>
+            setNotice("设备凭据清理失败，请清除本站点数据"),
+          );
+        userRef.current = next;
+        setUser(next);
+      }
     });
     return () => data.subscription.unsubscribe();
   }, []);
@@ -104,6 +160,44 @@ export function App() {
       alive = false;
     };
   }, [user]);
+  useEffect(() => {
+    if (!user || !vault || reset) return;
+    const epoch = generation.current;
+    let alive = true;
+    void restoreDevice(vault)
+      .then((restored) => {
+        if (alive && epoch === generation.current && restored) {
+          setKey(restored);
+          setTrust(true);
+        }
+      })
+      .catch(() => {
+        if (alive) setNotice("无法恢复设备解锁，请输入主密码重新解锁");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [user, vault, reset]);
+  useEffect(() => {
+    const revoked = (event: StorageEvent) => {
+      if (
+        userRef.current &&
+        event.key === `miyu-trust-revoked:${userRef.current}`
+      ) {
+        generation.current++;
+        setKey(null);
+        setRecovery("");
+        setTrust(false);
+      }
+    };
+    window.addEventListener("storage", revoked);
+    return () => window.removeEventListener("storage", revoked);
+  }, []);
+  async function logout() {
+    lock();
+    const result = await client?.auth.signOut({ scope: "local" });
+    if (result?.error) setNotice("退出失败，请检查网络后重试；密码库已锁定");
+  }
   async function action(fn: () => Promise<void>) {
     setLoading(true);
     setNotice("");
@@ -118,7 +212,7 @@ export function App() {
   async function auth(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
-    const email = String(f.get("email")),
+    const email = String(f.get("email")).trim(),
       password = String(f.get("password"));
     e.currentTarget.reset();
     await action(async () => {
@@ -136,12 +230,7 @@ export function App() {
                 redirectTo: redirectTo(),
               })
             : await client.auth.signInWithPassword({ email, password });
-      if (result.error)
-        throw new Error(
-          authMode === "登录"
-            ? "登录失败，请检查邮箱、密码和邮箱验证状态"
-            : "请求失败，请检查邮箱格式、密码要求和发送频率",
-        );
+      if (result.error) throw new Error(authErrorText(result.error));
       if (authMode !== "登录") setNotice("请查收邮箱中的验证或重置链接");
     });
   }
@@ -152,6 +241,19 @@ export function App() {
       old = String(f.get("recovery"));
     e.currentTarget.reset();
     const epoch = generation.current;
+    const revision = user ? trustRevision(user) : "";
+    const remember = (v: Vault) =>
+      trust
+        ? async (raw: Uint8Array) => {
+            if (epoch !== generation.current) return;
+            try {
+              await rememberDevice(v, raw, revision);
+            } catch {
+              setTrust(false);
+              setNotice("本机存储不可用，本次仅临时解锁，请勿依赖记住状态");
+            }
+          }
+        : undefined;
     await action(async () => {
       if (!user) return;
       if (vault === null) {
@@ -160,7 +262,11 @@ export function App() {
         await saveVault(created.vault, true);
         if (epoch !== generation.current) return;
         setVault(created.vault);
-        setKey(created.key);
+        const firstKey = trust
+          ? await unlock(created.vault, password, remember(created.vault))
+          : created.key;
+        if (epoch !== generation.current) return;
+        setKey(firstKey);
         setRecovery(created.recoveryKey);
       } else if (vault) {
         try {
@@ -168,7 +274,7 @@ export function App() {
             ? await rewrap(vault, old, password, true)
             : vault;
           if (recover) await saveVault(updated);
-          const nextKey = await unlock(updated, password);
+          const nextKey = await unlock(updated, password, remember(updated));
           if (epoch !== generation.current) return;
           setVault(updated);
           setKey(nextKey);
@@ -189,16 +295,30 @@ export function App() {
       </span>
     </div>
   );
-  if (user && key && vault)
+  if (user && key && vault && !reset)
     return (
       <>
+        {notice && (
+          <div className="banner" role="status">
+            {notice}
+          </div>
+        )}
         <Workspace
           key={user + vault.id}
           user={user}
           vault={vault}
           cryptoKey={key}
           lock={lock}
-          updateVault={setVault}
+          logout={logout}
+          trusted={trust}
+          updateVault={(v) => {
+            setVault(v);
+            setTrust(false);
+            if (user)
+              void forgetDevice(user).catch(() =>
+                setNotice("请清除本站点数据以取消设备信任"),
+              );
+          }}
           dark={dark}
           toggleTheme={() => setDark(!dark)}
           brand={brand}
@@ -322,6 +442,17 @@ export function App() {
             ) : (
               <form onSubmit={unlockForm}>
                 <p>登录密码与主密码独立。主密码不会上传服务器。</p>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={trust}
+                    onChange={(e) => setTrust(e.target.checked)}
+                  />
+                  信任此设备 / 记住解锁状态
+                </label>
+                <small>
+                  仅在私人设备开启。重新打开可自动解锁；手动锁定或退出会清除设备凭据。
+                </small>
                 {recover && (
                   <label>
                     恢复密钥
@@ -376,7 +507,7 @@ export function App() {
                 <button
                   type="button"
                   className="text-button"
-                  onClick={() => void client?.auth.signOut({ scope: "local" })}
+                  onClick={() => void logout()}
                 >
                   退出登录
                 </button>
@@ -385,6 +516,9 @@ export function App() {
           ) : (
             <form onSubmit={auth}>
               <p>登录后，在此设备解锁你的私人密码库。</p>
+              {authMode === "注册" && (
+                <p>登录密码至少 12 个字符，支持更长的密码。</p>
+              )}
               <label>
                 邮箱地址
                 <input
@@ -433,7 +567,9 @@ export function App() {
               {notice}
             </p>
           )}
-          <small>此设备会保持登录。刷新或关闭页面后需重新解锁密码库。</small>
+          <small>
+            登录状态自动续期；切换应用或闲置不会锁定，请按需手动锁定。
+          </small>
         </div>
       </section>
     </main>
@@ -445,6 +581,8 @@ type WorkspaceProps = {
   vault: Vault;
   cryptoKey: CryptoKey;
   lock: () => void;
+  logout?: () => Promise<void>;
+  trusted?: boolean;
   updateVault: (v: Vault) => void;
   dark: boolean;
   toggleTheme: () => void;
@@ -455,6 +593,8 @@ export function Workspace({
   vault,
   cryptoKey,
   lock,
+  logout,
+  trusted = false,
   updateVault,
   dark,
   toggleTheme,
@@ -873,6 +1013,16 @@ export function Workspace({
                 </label>
                 <button disabled={busy}>校验并恢复</button>
               </form>
+              <h3>设备信任</h3>
+              <p>
+                {trusted
+                  ? "已选择记住此设备的解锁状态。"
+                  : "未记住解锁状态，重新打开需输入主密码。"}
+              </p>
+              <button onClick={lock}>取消设备信任并锁定</button>
+              <p>
+                要开启设备信任，请锁定后在解锁页勾选。切换应用和长时间闲置不会自动锁定。
+              </p>
               <h3>剪贴板提醒</h3>
               <label className="check">
                 <input
@@ -889,7 +1039,7 @@ export function Workspace({
                 复制 30 秒后提醒清理
               </label>
               <p>
-                浏览器无法保证自动清除所有系统剪贴板内容。切换应用后提醒可能停止，请在不使用时手动锁定密码库。
+                浏览器无法保证自动清除所有系统剪贴板内容。应用在后台时提醒可能被系统延迟。
               </p>
               <h3>安装到桌面</h3>
               <p>
@@ -899,8 +1049,11 @@ export function Workspace({
               </p>
               <button
                 onClick={() => {
-                  lock();
-                  void client?.auth.signOut({ scope: "local" });
+                  if (logout) void logout();
+                  else {
+                    lock();
+                    void client?.auth.signOut({ scope: "local" });
+                  }
                 }}
               >
                 <LogOut size={17} />
